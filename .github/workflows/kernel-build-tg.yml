@@ -1,14 +1,10 @@
-name: Pi Kernel Build Telegram
+name: Pi kernel build Telegram
 
 on:
-  push:
-    branches: [ "rpi-*" ]
-  pull_request:
-    branches: [ "rpi-*" ]
   workflow_dispatch:
 
 env:
-  JOBS: 6
+  NUM_JOBS: 6
 
 jobs:
   build:
@@ -16,76 +12,89 @@ jobs:
     strategy:
       matrix:
         include:
-          - { name: bcm2835,   arch: arm,   defconfig: bcm2835_defconfig,   image: zImage,   kernel: kernel }
-          - { name: bcmrpi,    arch: arm,   defconfig: bcmrpi_defconfig,    image: zImage,   kernel: kernel }
-          - { name: bcm2709,   arch: arm,   defconfig: bcm2709_defconfig,   image: zImage,   kernel: kernel7 }
-          - { name: bcm2711,   arch: arm64, defconfig: bcm2711_defconfig,   image: Image.gz, kernel: kernel8 }
-          - { name: bcm2711_rt, arch: arm64, defconfig: bcm2711_rt_defconfig, image: Image.gz, kernel: kernel8_rt }
-          - { name: bcm2712,   arch: arm64, defconfig: bcm2712_defconfig,   image: Image.gz, kernel: kernel_2712 }
+          - name: bcm2835
+            arch: arm
+            defconfig: bcm2835_defconfig
+            kernel: kernel
+
+          - name: arm64
+            arch: arm64
+            defconfig: defconfig
+            kernel: kernel8
+
+          - name: bcmrpi
+            arch: arm
+            defconfig: bcmrpi_defconfig
+            kernel: kernel
+
+          - name: bcm2709
+            arch: arm
+            defconfig: bcm2709_defconfig
+            kernel: kernel7
+
+          - name: bcm2711
+            arch: arm64
+            defconfig: bcm2711_defconfig
+            kernel: kernel8
+
+          - name: bcm2711_rt
+            arch: arm64
+            defconfig: bcm2711_rt_defconfig
+            kernel: kernel8_rt
+
+          - name: bcm2712
+            arch: arm64
+            defconfig: bcm2712_defconfig
+            kernel: kernel_2712
 
     steps:
     - uses: actions/checkout@v4
+      with:
+        fetch-depth: 1
+        clean: true
 
-    - name: Notify Telegram (start)
-      run: |
-        MSG="🚀 *Starting:* \`${{matrix.name}}\` — branch \`${{ github.ref_name }}\`"
-        curl -s -X POST "https://api.telegram.org/bot${{secrets.TELEGRAM_BOT_TOKEN}}/sendMessage" \
-          -d chat_id="${{secrets.TELEGRAM_CHAT_ID}}" \
-          -d parse_mode="Markdown" \
-          -d text="$MSG"
-
-    - name: Install cross-toolchain (ARM)
+    - name: Install armhf crossbuild toolchain
       if: matrix.arch == 'arm'
       run: |
         sudo apt-get update -y
         sudo apt-get install -y gcc-arm-linux-gnueabihf
 
-    - name: Build kernel
+    - name: Build kernel ${{ matrix.name }}
       run: |
         mkdir build install
-        export ARCH=${{matrix.arch}}
-        [[ "$ARCH" == "arm" ]] && export CROSS_COMPILE=arm-linux-gnueabihf-
-        make O=build ${{matrix.defconfig}}
-        make O=build -j${{env.JOBS}} ${{matrix.image}} modules dtbs
-        make O=build INSTALL_MOD_PATH=install modules_install
-        cp build/arch/$ARCH/boot/${{matrix.image}} install/${{matrix.kernel}}.img
-
-    - name: Archive result
-      run: |
-        if [[ "${{matrix.arch}}" == "arm64" ]]; then
-          zip -r ${{matrix.name}}.zip install
+        export ARCH=${{ matrix.arch }}
+        if [[ "$ARCH" == "arm64" ]]; then
+          export IMAGE=Image.gz
+          export DTS_SUBDIR=broadcom
         else
-          tar -cf ${{matrix.name}}.tar -C install .
+          export IMAGE=zImage
+          export CROSS_COMPILE=arm-linux-gnueabihf-
+          export DTS_SUBDIR=broadcom
         fi
 
-    - name: Upload artifact
+        make O=build ${{ matrix.defconfig }}
+        make O=build -j${{ env.NUM_JOBS }} $IMAGE modules dtbs
+        make O=build INSTALL_MOD_PATH=install modules_install
+
+        mkdir -p install/boot/overlays
+        cp build/arch/$ARCH/boot/$IMAGE install/boot/${{ matrix.kernel }}.img
+        cp build/arch/$ARCH/boot/dts/$DTS_SUBDIR/*.dtb install/boot/
+        cp build/arch/$ARCH/boot/dts/overlays/*.dtb* install/boot/overlays/
+        cp arch/$ARCH/boot/dts/overlays/README install/boot/overlays/
+
+    - name: Package build
+      run: |
+        if [[ "${{ matrix.arch }}" == "arm64" ]]; then
+          zip -r ${{ matrix.name }}_build.zip install
+        else
+          tar -cf ${{ matrix.name }}_build.tar -C install .
+        fi
+
+    - name: Upload results
       uses: actions/upload-artifact@v4
       with:
-        name: ${{matrix.name}}
+        name: ${{ matrix.name }}_build
         path: |
-          ${{matrix.name}}.tar
-          ${{matrix.name}}.zip
+          ${{ matrix.name }}_build.tar
+          ${{ matrix.name }}_build.zip
         retention-days: 30
-
-    - name: Notify Telegram (success)
-      if: success()
-      run: |
-        FILE=$( [[ "${{matrix.arch}}" == "arm64" ]] && echo "${{matrix.name}}.zip" || echo "${{matrix.name}}.tar" )
-        MSG="✅ *Build succeeded:* \`${{matrix.name}}\` — branch \`${{ github.ref_name }}\`"
-        curl -s -X POST "https://api.telegram.org/bot${{secrets.TELEGRAM_BOT_TOKEN}}/sendMessage" \
-          -d chat_id="${{secrets.TELEGRAM_CHAT_ID}}" \
-          -d parse_mode="Markdown" \
-          -d text="$MSG"
-        curl -F chat_id="${{secrets.TELEGRAM_CHAT_ID}}" \
-             -F document=@$FILE \
-             -F caption="📦 \`$FILE\`" \
-             https://api.telegram.org/bot${{secrets.TELEGRAM_BOT_TOKEN}}/sendDocument
-
-    - name: Notify Telegram (failure)
-      if: failure()
-      run: |
-        MSG="❌ *Build failed:* \`${{matrix.name}}\` — branch \`${{ github.ref_name }}\`"
-        curl -s -X POST "https://api.telegram.org/bot${{secrets.TELEGRAM_BOT_TOKEN}}/sendMessage" \
-          -d chat_id="${{secrets.TELEGRAM_CHAT_ID}}" \
-          -d parse_mode="Markdown" \
-          -d text="$MSG"
