@@ -1,0 +1,142 @@
+name: Pi kernel build Telegram
+
+on:
+  pull_request:
+    paths-ignore:
+      - '.github/**'
+    branches: [ "rpi-*" ]
+  push:
+    paths-ignore:
+      - '.github/**'
+    branches: [ "rpi-*" ]
+  workflow_dispatch:
+
+env:
+  NUM_JOBS: 6
+  START_TIME: ${{ github.run_started_at }}
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04-arm
+    strategy:
+      matrix:
+        include:
+          - name: bcm2835
+            arch: arm
+            defconfig: bcm2835_defconfig
+            kernel: kernel
+
+          - name: arm64
+            arch: arm64
+            defconfig: defconfig
+            kernel: kernel8
+
+          - name: bcmrpi
+            arch: arm
+            defconfig: bcmrpi_defconfig
+            kernel: kernel
+
+          - name: bcm2709
+            arch: arm
+            defconfig: bcm2709_defconfig
+            kernel: kernel7
+
+          - name: bcm2711
+            arch: arm64
+            defconfig: bcm2711_defconfig
+            kernel: kernel8
+
+          - name: bcm2711_rt
+            arch: arm64
+            defconfig: bcm2711_rt_defconfig
+            kernel: kernel8_rt
+
+          - name: bcm2712
+            arch: arm64
+            defconfig: bcm2712_defconfig
+            kernel: kernel_2712
+
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 1
+        clean: true
+
+    - name: Send start notification to Telegram
+      run: |
+        COMMIT_URL="https://github.com/${{ github.repository }}/commit/${{ github.sha }}"
+        RUN_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+        MSG="🚀 *Starting kernel build:* \`${{matrix.name}}\`%0A📦 Repo: [${{ github.repository }}](https://github.com/${{ github.repository }})%0A🌿 Branch: \`${{ github.ref_name }}\`%0A🧑 Author: [${{ github.actor }}](https://github.com/${{ github.actor }})%0A💬 Commit: [${{ github.event.head_commit.message || github.event.pull_request.title }}]($COMMIT_URL)%0A🕐 Started at: ${{ env.START_TIME }}%0A🔗 [View build logs]($RUN_URL)"
+        curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+          -d chat_id="${{ secrets.TELEGRAM_CHAT_ID }}" \
+          -d parse_mode="Markdown" \
+          -d text="$MSG"
+
+    - name: Install armhf crossbuild toolchain
+      if: matrix.arch == 'arm'
+      env:
+        DEBIAN_FRONTEND: noninteractive
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y gcc-arm-linux-gnueabihf
+      timeout-minutes: 15
+
+    - name: Build kernel ${{matrix.name}}
+      run: |
+        mkdir ${{github.workspace}}/build
+        export ARCH=${{matrix.arch}}
+        if [[ "$ARCH" == "arm64" ]]; then
+          export DTS_SUBDIR=broadcom
+          export IMAGE=Image.gz
+        else
+          export CROSS_COMPILE=arm-linux-gnueabihf-
+          export DTS_SUBDIR=broadcom
+          export IMAGE=zImage
+        fi
+        make O=${{github.workspace}}/build ${{matrix.defconfig}}
+        scripts/config --file ${{github.workspace}}/build/.config --set-val CONFIG_WERROR y
+        make O=${{github.workspace}}/build -j ${{env.NUM_JOBS}} $IMAGE modules dtbs
+        mkdir -p ${{github.workspace}}/install/boot/overlays
+        make O=${{github.workspace}}/build INSTALL_MOD_PATH=${{github.workspace}}/install modules_install
+        cp ${{github.workspace}}/build/arch/${ARCH}/boot/dts/${DTS_SUBDIR}/*.dtb ${{github.workspace}}/install/boot/
+        cp ${{github.workspace}}/build/arch/${ARCH}/boot/dts/overlays/*.dtb* ${{github.workspace}}/install/boot/overlays/
+        cp ${{github.workspace}}/arch/${ARCH}/boot/dts/overlays/README ${{github.workspace}}/install/boot/overlays/
+        cp ${{github.workspace}}/build/arch/${ARCH}/boot/$IMAGE ${{github.workspace}}/install/boot/${{matrix.kernel}}.img
+
+    - name: Tar build
+      run: tar -cvf ${{matrix.name}}_build.tar -C ${{github.workspace}}/install .
+
+    - name: Upload results to GitHub
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{matrix.name}}_build
+        path: ${{matrix.name}}_build.tar
+        retention-days: 90
+
+    - name: Send success message and file to Telegram
+      if: success()
+      run: |
+        END_TIME=$(date -u +"%Y-%m-%d %H:%M:%S UTC")
+        RUN_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+        MSG="✅ *Build succeeded:* \`${{matrix.name}}\`%0A🌿 Branch: \`${{ github.ref_name }}\`%0A🕐 Finished at: $END_TIME%0A🔗 [View build logs]($RUN_URL)"
+        curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+          -d chat_id="${{ secrets.TELEGRAM_CHAT_ID }}" \
+          -d parse_mode="Markdown" \
+          -d text="$MSG"
+
+        # Send the built file to Telegram
+        curl -F chat_id="${{ secrets.TELEGRAM_CHAT_ID }}" \
+             -F document=@${{matrix.name}}_build.tar \
+             -F caption="📦 \`${{matrix.name}}_build.tar\`" \
+             https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendDocument
+
+    - name: Send failure message to Telegram
+      if: failure()
+      run: |
+        END_TIME=$(date -u +"%Y-%m-%d %H:%M:%S UTC")
+        RUN_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+        MSG="❌ *Build failed:* \`${{matrix.name}}\`%0A🌿 Branch: \`${{ github.ref_name }}\`%0A🕐 Ended at: $END_TIME%0A🔗 [Check logs]($RUN_URL)"
+        curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+          -d chat_id="${{ secrets.TELEGRAM_CHAT_ID }}" \
+          -d parse_mode="Markdown" \
+          -d text="$MSG"
